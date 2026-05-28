@@ -11,7 +11,7 @@
 ###############################################################################
 
 # Create top level static library and all sub-libraries
-all: Main DataStructures Networking Systems
+all: Main DataStructures Networking Systems Hashing
 
 
 
@@ -20,8 +20,8 @@ all: Main DataStructures Networking Systems
 ###############################################################################
 
 # Creates just the top level static library
-Main: DataStructuresSub NetworkingSub SystemsSub
-		ar rcs libeom.a Node.o LinkedList.o Queue.o BinarySearchTree.o Entry.o Dictionary.o Client.o Server.o HTTPServer.o HTTPRequest.o ThreadPool.o PeerToPeer.o Files.o
+Main: DataStructuresSub NetworkingSub SystemsSub HashingSub
+		ar rcs libeom.a Node.o LinkedList.o Queue.o BinarySearchTree.o Entry.o Dictionary.o Client.o Server.o HTTPServer.o HTTPRequest.o ThreadPool.o PeerToPeer.o Files.o Hash.o
 
 
 
@@ -101,6 +101,17 @@ ThreadPool:
 Files:
 	gcc -c Systems/Files.c
 
+###############################################################################
+# MARK: Hashing
+###############################################################################
+
+Hashing: HashingSub
+	ar rcs Hashing/Hashing.a Hash.o
+
+HashingSub: Hash
+
+Hash:
+	gcc -c Hashing/Hash.c
 
 ###############################################################################
 # MARK: CLEAN

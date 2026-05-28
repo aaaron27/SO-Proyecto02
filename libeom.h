@@ -21,6 +21,6 @@
 
 #include "Systems.h"
 
-
+#include "Hashing.h"
 
 #endif /* libeom_h */

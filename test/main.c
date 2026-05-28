@@ -36,6 +36,12 @@ void * server_function(void *arg)
         printf("\t\t\t%s says: %s\n", client_address, request);
         close(client);
 
+        /*
+         * Es mensaje find?
+         * * Recibir hash1 y hash2
+         * * Buscarlo en local, sino preguntar a los known_hosts
+         */
+
         pthread_mutex_lock(&hosts_mutex);
         short found = 0;
         for (int i = 0; i < p2p->known_hosts.length && !found; i++)
@@ -64,6 +70,12 @@ void * client_function(void *arg)
         memset(request, 0, 255);
         fgets(request, 255, stdin);
 
+        /*
+         * Detectar si el request es de tipo find
+         * * Si si -> generar el double_hash
+         * * Enviar el mensaje: find hash1 hash2
+         */
+
         pthread_mutex_lock(&hosts_mutex);
         for (int i = 0; i < p2p->known_hosts.length; i++)
         {
@@ -81,10 +93,12 @@ int main(int argc, char *argv[]) {
         AF_INET, SOCK_STREAM, 0, port, INADDR_ANY,
         server_function, client_function);
 
+    // extraer ip y puerto, y insertarlo en known_hosts
+    // i.e 127.0.0.1:1234
     if (argc > 2) {
         char ip[64]; int peer_port;
         sscanf(argv[2], "%63[^:]:%d", ip, &peer_port);
-        p2p.known_hosts.insert(&p2p.known_hosts,  p2p.known_hosts.length, ip, peer_port);
+        p2p.known_hosts.insert(&p2p.known_hosts,  p2p.known_hosts.length, ip, strlen(ip) + 1);
     }
 
     p2p.user_portal(&p2p);
