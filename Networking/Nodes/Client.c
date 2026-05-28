@@ -1,6 +1,6 @@
 //
 // ==================================
-// libeom
+// Proyecto02
 //
 // an open source c library.
 // ==================================
@@ -46,6 +46,10 @@ struct Client client_constructor(int domain, int service, int protocol, int port
 }
 
 // MARK: PRIVATE MEMBER METHODS
+
+char * find(struct Client *client, char *server_ip, void *request, unsigned long size) {
+
+}
 
 char * request(struct Client *client, char *server_ip, void *request, unsigned long size)
 {

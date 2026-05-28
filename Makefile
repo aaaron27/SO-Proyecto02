@@ -1,6 +1,6 @@
-# libeom
+# Proyecto02
 #
-# Makefile for libeom - provides options for creating a static library out of all or part of libeom
+# Makefile for Proyecto02 - provides options for creating a static library out of all or part of Proyecto02
 #
 # 2021-02-12
 # Eric Meehan
@@ -109,3 +109,6 @@ Files:
 # Remove all .o files
 clean:
 	rm *.o
+
+test: Main
+	gcc test/main.c libeom.a -o main

@@ -3,13 +3,13 @@
 // 2/13/21
 //
 // Homo Deus C Library
-// libeom.h
+// Proyecto02.h
 //
 // Eric Meehan
 //  
 
 /*
- This header file includes headers for each sub-module of libeom and can be used to import the entire library into a project.
+ This header file includes headers for each sub-module of Proyecto02 and can be used to import the entire library into a project.
  */
 
 #ifndef libeom_h

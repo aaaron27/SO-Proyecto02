@@ -1,6 +1,6 @@
 //
 // ==================================
-// libeom
+// Proyecto02
 //
 // an open source c library.
 // ==================================
@@ -34,18 +34,20 @@ struct PeerToPeer peer_to_peer_constructor(int domain, int service, int protocol
     peer_to_peer.protocol = protocol;
     peer_to_peer.port = port;
     peer_to_peer.interface = interface;
-    
+
     peer_to_peer.known_hosts = linked_list_constructor();
-    peer_to_peer.known_hosts.insert(&peer_to_peer.known_hosts, 0, "127.0.0.1", 10);
-    
+    char loopback[72];
+    snprintf(loopback, sizeof(loopback), "127.0.0.1:%d", port);
+    peer_to_peer.known_hosts.insert(&peer_to_peer.known_hosts, 0,
+                                    loopback, strlen(loopback) + 1);
+
     peer_to_peer.server = server_constructor(domain, service, protocol, interface, port, 20);
     peer_to_peer.server.register_routes(&peer_to_peer.server, known_hosts, "/known_hosts\n");
 
-    
     peer_to_peer.user_portal = user_portal;
     peer_to_peer.server_function = server_function;
     peer_to_peer.client_function = client_function;
-    
+
     return peer_to_peer;
 }
 

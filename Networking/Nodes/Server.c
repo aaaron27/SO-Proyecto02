@@ -1,6 +1,6 @@
 //
 // ==================================
-// libeom
+// Proyecto02
 //
 // an open source c library.
 // ==================================
@@ -76,5 +76,4 @@ void register_routes_server(struct Server *server, char *(*route_function)(void 
     struct ServerRoute route;
     route.route_function = route_function;
     server->routes.insert(&server->routes, path, sizeof(char[strlen(path)]), &route, sizeof(route));
-    
 }
