@@ -11,7 +11,7 @@
 ###############################################################################
 
 # Create top level static library and all sub-libraries
-all: Main DataStructures Networking Systems Hashing
+all: Main DataStructures Networking Systems Hashing test
 
 
 
