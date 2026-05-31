@@ -87,6 +87,24 @@ void * client_function(void *arg)
 }
 
 int main(int argc, char *argv[]) {
+    char *c = "hola todos";
+    char *c2 = "hola todos me cago en sus muertos";
+    char *ip1 = "127.0.0.1";
+    hash_constructor();
+
+    hash_insert(c, strlen(c), ip1);
+    hash_insert(c2, strlen(c), ip1);
+
+    HashEntry *entry = file_search_string(c);
+    HashEntry *entry2 = file_search_hash(hash_generate(c));
+
+    if (entry != NULL) {
+        printf("%s\n%s\n", entry->ip, entry->path);
+    }
+    if (entry != NULL) {
+        printf("%s\n%s\n", entry2->ip, entry2->path);
+    }
+
     int port = argc > 1 ? atoi(argv[1]) : 1248;
 
     struct PeerToPeer p2p = peer_to_peer_constructor(

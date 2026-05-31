@@ -4,27 +4,21 @@
 
 #ifndef PROYECTO02_HASH_H
 #define PROYECTO02_HASH_H
-
-const int p1 = 257;
-const int p2 = 53;
+#include <stddef.h>
 
 typedef struct {
+    long long key;
     char *ip; // owner
-    void *value; // info
-    struct HashEntry *next;
+    char *path;
+    size_t l; size_t r;
 } HashEntry;
 
-typedef struct {
-    HashEntry **buckets;
-    int count;
-} HashTable;
+void hash_constructor();
+long long hash_generate(char *string);
+int hash_insert(char* file, size_t size, char *ip);
+HashEntry *file_search_hash(long long hash);
+HashEntry *file_search_string(char *file);
 
-typedef struct {
-    long long hash1;
-    long long hash2;
-} DoubleHash;
-
-DoubleHash generate_double_hash(char *string);
-long long generate_hash(char *string, int p);
+int compare_long_long_keys(void *entry_one, void *entry_two);
 
 #endif //PROYECTO02_HASH_H
