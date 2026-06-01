@@ -5,7 +5,6 @@
 #include "../DataStructures/Dictionary/Dictionary.h"
 #include "../DataStructures/Dictionary/Entry.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,45 +22,97 @@ int compare_long_long_keys(void *entry_one, void *entry_two) {
     return 0;
 }
 
-int create_file(long long hash, char *file) {
-    char *title = malloc(20 + sizeof("shared_data/"));
-    snprintf(title, sizeof("shared_data/") + 20, "shared_data/%lld", hash);
+int create_file(unsigned long long hash, uint8_t *file, size_t size) {
+    char title[64];
+    snprintf(title, sizeof(title), "hash_files/shared_data/%lld", hash);
 
-    FILE *f = fopen(title, "w");
-    free(title);
-
+    FILE *f = fopen(title, "wb");
     if (f == NULL) {
         return 0;
     }
 
-    fputs(file, f);
+    const size_t written = fwrite(file, 1, size, f);
     fclose(f);
-    return 1;
+
+    return written == size;
+}
+
+void refill_dictionary() {
+    FILE *f = fopen("hash_files/hash_log", "r");
+    if (f == NULL) return;
+
+    char line[256];
+    HashEntry entry;
+
+    printf("Refilling BST\n");
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+
+        if (strcmp(line, "-") == 0) continue;
+        entry.key = strtoull(line, NULL, 10);
+
+        fgets(line, sizeof(line), f);
+        line[strcspn(line, "\n")] = '\0';
+        entry.ip = strdup(line);
+
+        fgets(line, sizeof(line), f);
+        line[strcspn(line, "\n")] = '\0';
+        entry.path = strdup(line);
+
+        fgets(line, sizeof(line), f);
+        line[strcspn(line, "\n")] = '\0';
+        entry.size = (size_t)strtoull(line, NULL, 10);
+
+        printf("hash: %lld | ip_owner: %s | pathfile: %s | size: %lu\n",
+               entry.key, entry.ip, entry.path, entry.size);
+
+        free(entry.ip);
+        free(entry.path);
+    }
+
+    fclose(f);
+}
+
+void insert_hash_in_log(HashEntry hashEntry) {
+    FILE *f = fopen("hash_files/hash_log", "ab");
+
+    if (f == NULL) {
+        printf("Error opening hash_log\n");
+        return;
+    }
+
+    fputs("-\n", f);
+    fprintf(f, "%llu\n", hashEntry.key);
+    fprintf(f, "%s\n", hashEntry.ip);
+    fprintf(f, "%s\n", hashEntry.path);
+    fprintf(f, "%lu\n", hashEntry.size);
+
+    fclose(f);
 }
 
 void hash_constructor() {
     dictionary = dictionary_constructor(compare_long_long_keys);
+    refill_dictionary();
 }
 
-long long hash_generate(char *string) {
-    const int m = 1000000009;
-    long long hash_value = 0;
-    long long p_pow = 1;
-    for (int i = 0; i < strlen(string); i++) {
-        hash_value = (hash_value + ((unsigned char)tolower(string[i] - 'a' + 1)) * p_pow) % m;
+unsigned long long hash_generate(uint8_t *file, size_t size) {
+    const unsigned long long m = 1000000009;
+    unsigned long long hash_value = 0;
+    unsigned long long p_pow = 1;
+    for (size_t i = 0; i < size; i++) {
+        hash_value = (hash_value + (file[i] + 1ULL) * p_pow) % m;
         p_pow = (p_pow * p) % m;
     }
     return hash_value;
 }
 
-int hash_insert(char* file, const size_t size, char *ip) {
+int hash_insert(uint8_t *file, const size_t size, char *ip) {
     HashEntry entry;
     entry.ip = ip;
-    entry.l = 0;
-    entry.r = size-1;
-    entry.key = hash_generate(file);
+    entry.size = size;
+    entry.key = hash_generate(file, size);
 
-    const int file_result = create_file(entry.key, file);
+    const int file_result = create_file(entry.key, file, size);
 
     if (!file_result) {
         printf("Couldnt find %lld file\n", entry.key);
@@ -70,28 +121,24 @@ int hash_insert(char* file, const size_t size, char *ip) {
 
     printf("Created file %lld\n", entry.key);
 
-    char *title = malloc(20 + sizeof("shared_data/"));
-    snprintf(title, sizeof("shared_data/") + 20, "shared_data/%lld", entry.key);
-    entry.path = title;
+    char title[64];
+    snprintf(title, sizeof(title), "hash_files/shared_data/%lld", entry.key);
+    entry.path = strdup(title);
 
-    long long key = entry.key;
-    dictionary.insert(&dictionary, &key, sizeof(long long), &entry, sizeof(entry));
+    unsigned long long key = entry.key;
+    dictionary.insert(&dictionary, &key, sizeof(unsigned long long), &entry, sizeof(entry));
+
+    insert_hash_in_log(entry);
 
     return 1;
 }
 
-HashEntry *file_search_hash(long long hash) {
+HashEntry *file_search_hash(unsigned long long hash) {
     if (dictionary.binary_search_tree.head == NULL) {
         printf("Dictionary is empty\n");
         return NULL;
     }
 
-    HashEntry *entry = dictionary.search(&dictionary, &hash, sizeof(long long));
+    HashEntry *entry = dictionary.search(&dictionary, &hash, sizeof(unsigned long long));
     return entry;
 }
-
-HashEntry *file_search_string(char* file) {
-    const long long hash = hash_generate(file);
-    return file_search_hash(hash);
-}
-
