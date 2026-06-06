@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 const int p = 12289;
 
@@ -66,8 +67,10 @@ void refill_dictionary() {
         printf("hash: %lld | ip_owner: %s | pathfile: %s | size: %lu\n",
                entry.key, entry.ip, entry.path, entry.size);
 
-        free(entry.ip);
-        free(entry.path);
+        // Reinsertar en el BST (los punteros ip/path pertenecen al nodo del árbol)
+        unsigned long long key = entry.key;
+        dictionary.insert(&dictionary, &key, sizeof(unsigned long long),
+                          &entry, sizeof(entry));
     }
 
     fclose(f);
@@ -141,4 +144,64 @@ HashEntry *file_search_hash(unsigned long long hash) {
 
     HashEntry *entry = dictionary.search(&dictionary, &hash, sizeof(unsigned long long));
     return entry;
+}
+
+int hash_register(unsigned long long hash, size_t size, const char *ip, int port, const char *filename) {
+    FILE *f = fopen("hash_files/registry", "a");
+    if (!f) return 0;
+    fprintf(f, "%llu %zu %s %d %s\n", hash, size, ip, port, filename);
+    fclose(f);
+    return 1;
+}
+
+void hash_locate(unsigned long long hash, int fd) {
+    FILE *f = fopen("hash_files/registry", "r");
+    if (!f) {
+        write(fd, "END\n", 4);
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        unsigned long long h;
+        size_t size;
+        char ip[64];
+        int port;
+        char filename[256];
+        if (sscanf(line, "%llu %zu %63s %d %255s", &h, &size, ip, &port, filename) != 5)
+            continue;
+        if (h == hash) {
+            char result[512];
+            int len = snprintf(result, sizeof(result), "%s %d %s\n", ip, port, filename);
+            write(fd, result, len);
+        }
+    }
+    fclose(f);
+    write(fd, "END\n", 4);
+}
+
+void hash_find(const char *name, int fd) {
+    FILE *f = fopen("hash_files/registry", "r");
+    if (!f) {
+        write(fd, "END\n", 4);
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        unsigned long long hash;
+        size_t size;
+        char ip[64];
+        int port;
+        char filename[256];
+        if (sscanf(line, "%llu %zu %63s %d %255s", &hash, &size, ip, &port, filename) != 5)
+            continue;
+        if (strstr(filename, name)) {
+            char result[512];
+            int len = snprintf(result, sizeof(result), "%llu %zu %s %d %s\n", hash, size, ip, port, filename);
+            write(fd, result, len);
+        }
+    }
+    fclose(f);
+    write(fd, "END\n", 4);
 }

@@ -31,7 +31,7 @@ char * request(struct Client *client, char *server_ip, void *request, unsigned l
 
 // MARK: CONSTRUCTORS
 
-struct Client client_constructor(int domain, int service, int protocol, int port, u_long interface)
+struct Client client_constructor(int domain, int service, int protocol, int port, unsigned long interface)
 {
     // Instantiate a client object.
     struct Client client;
