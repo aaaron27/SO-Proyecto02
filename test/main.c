@@ -333,7 +333,7 @@ void *client_function(void *arg)
                 ln = strtok(NULL, "\n");
             }
 
-            if (n_peers == 0) {
+            if (!n_peers) {
                 printf("Ningún peer tiene hash=%llu.\n", hash);
                 printf("> "); fflush(stdout); continue;
             }
@@ -376,16 +376,7 @@ void *client_function(void *arg)
 
             // 6. Guardar archivo ensamblado en shared/
             if (ok) {
-                char save_path[512];
-                snprintf(save_path, sizeof(save_path), "shared/%s", filename);
-                FILE *out = fopen(save_path, "wb");
-                if (out) {
-                    fwrite(assembled, 1, size, out);
-                    fclose(out);
-                    printf("Guardado en %s\n", save_path);
-                } else {
-                    printf("Error al guardar %s\n", save_path);
-                }
+                hash_insert(assembled, size, "127.0.0.1");
             } else {
                 printf("Descarga incompleta, archivo no guardado.\n");
             }
@@ -429,6 +420,7 @@ int main(int argc, char *argv[]) {
     FILE *hlog = fopen("hash_files/hash_log", "w");
     if (hlog) fclose(hlog);
 
+    // rellenamos el BST
     hash_constructor();
 
     int port = argc > 1 ? atoi(argv[1]) : 1248;
