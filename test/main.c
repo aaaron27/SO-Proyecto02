@@ -8,6 +8,8 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <pthread.h>
 
 static pthread_mutex_t hosts_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -15,7 +17,41 @@ static pthread_mutex_t hosts_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char server_ip[INET_ADDRSTRLEN] = "";
 static int  server_port = 0;
 
-// Abrir una nueva conexión TCP al servidor central. 
+typedef struct {
+    char query_id[128];
+    char search_term[256];
+    char origin_ip[64];
+    int origin_port;
+    int ttl;
+} DistributedSearchQuery;
+
+#define MAX_SEEN_QUERIES 100
+char seen_queries[MAX_SEEN_QUERIES][128];
+int seen_queries_index = 0;
+
+void mark_query_seen(const char* query_id) {
+    strncpy(seen_queries[seen_queries_index % MAX_SEEN_QUERIES], query_id, 128);
+    seen_queries_index++;
+}
+
+typedef struct {
+    struct PeerToPeer *p2p;
+    DistributedSearchQuery query;
+    char sender_ip[INET_ADDRSTRLEN];
+} DistSearchThreadArg;
+
+// Argumento para cada hilo de descarga de un chunk
+typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    int  port;
+    unsigned long long hash;
+    size_t offset;
+    size_t length;
+    uint8_t *dst;   // posición correcta dentro del buffer ensamblado
+    int success;
+} ChunkArg;
+
+// Abrir una nueva conexión TCP al servidor central.
 // Devuelve un fd (file descriptor) conectado, o -1 en caso de error.
 static int connect_to_server(void) {
     if (server_port == 0) return -1;
@@ -33,7 +69,7 @@ static int connect_to_server(void) {
     return fd;
 }
 
-// Scanea ./shared/, hashea cada archivo regular, 
+// Scanea ./shared/, hashea cada archivo regular,
 // y envía un mensaje REGISTER al servidor central por cada uno.
 static void scan_and_register(int my_port) {
     if (server_port == 0) return;
@@ -77,12 +113,166 @@ static void scan_and_register(int my_port) {
             close(fd);
             printf("Registered: %s  hash=%llu  size=%ld\n",
                    ent->d_name, hash, size);
-        } 
+        }
         else {
             printf("Could not reach server to register %s\n", ent->d_name);
         }
     }
     closedir(dir);
+}
+
+static void *download_chunk(void *arg) {
+    ChunkArg *ca = arg;
+    ca->success = 0;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return NULL;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(ca->port);
+    inet_pton(AF_INET, ca->ip, &addr.sin_addr);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd); return NULL;
+    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "FILEGET %llu %zu %zu",
+             ca->hash, ca->offset, ca->length);
+    send(fd, msg, strlen(msg), 0);
+    shutdown(fd, SHUT_WR);
+
+    size_t received = 0;
+    while (received < ca->length) {
+        int n = read(fd, ca->dst + received, ca->length - received);
+        if (n <= 0) break;
+        received += n;
+    }
+    close(fd);
+    ca->success = (received == ca->length);
+    return NULL;
+}
+
+void initiate_distributed_search(struct PeerToPeer *p2p, const char* search_term, int initial_ttl) {
+    DistributedSearchQuery query;
+    time_t current_time = time(NULL);
+
+    snprintf(query.query_id, sizeof(query.query_id), "127.0.0.1:%d-%ld", p2p->port, current_time);
+    strncpy(query.search_term, search_term, sizeof(query.search_term));
+    strncpy(query.origin_ip, "127.0.0.1", sizeof(query.origin_ip));
+    query.origin_port = p2p->port;
+    query.ttl = initial_ttl;
+
+    mark_query_seen(query.query_id);
+    printf("Iniciando búsqueda distribuida para: %s\n", search_term);
+
+    pthread_mutex_lock(&hosts_mutex);
+    for (int i = 0; i < p2p->known_hosts.length; i++) {
+        char host[72];
+        strncpy(host, (char *)p2p->known_hosts.retrieve(&p2p->known_hosts, i), sizeof(host) - 1);
+        host[sizeof(host) - 1] = '\0';
+
+        char host_ip[INET_ADDRSTRLEN];
+        int host_port = p2p->port;
+        sscanf(host, "%15[^:]:%d", host_ip, &host_port);
+
+        if (host_port == p2p->port || host_port == server_port) continue;
+
+        char query_msg[512];
+        snprintf(query_msg, sizeof(query_msg), "DISTFIND %s %s %s %d %d",
+                 query.query_id, query.search_term, query.origin_ip, query.origin_port, query.ttl);
+
+        struct Client c = client_constructor(p2p->domain, p2p->service, p2p->protocol, host_port, p2p->interface);
+        c.request(&c, host_ip, query_msg, strlen(query_msg) + 1);
+    }
+    pthread_mutex_unlock(&hosts_mutex);
+}
+
+static void *handle_incoming_search_thread(void *arg) {
+    DistSearchThreadArg *ts_arg = (DistSearchThreadArg *)arg;
+    struct PeerToPeer *p2p = ts_arg->p2p;
+    DistributedSearchQuery query = ts_arg->query;
+    char sender_ip[INET_ADDRSTRLEN];
+    strncpy(sender_ip, ts_arg->sender_ip, INET_ADDRSTRLEN);
+    free(ts_arg);
+
+    // REGLA 1: Evitar ciclos
+    pthread_mutex_lock(&hosts_mutex);
+    int seen = 0;
+    for (int i = 0; i < MAX_SEEN_QUERIES; i++) {
+        if (strcmp(seen_queries[i], query.query_id) == 0) seen = 1;
+    }
+    if (!seen) mark_query_seen(query.query_id);
+    pthread_mutex_unlock(&hosts_mutex);
+
+    if (seen) return NULL; // Ya procesado, evitamos ciclo infinito
+
+    // REGLA 2: Búsqueda Local (Escaneamos nuestra carpeta 'shared')
+    DIR *dir = opendir("shared");
+    if (dir) {
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (strstr(ent->d_name, query.search_term) != NULL) {
+                char path[512];
+                snprintf(path, sizeof(path), "shared/%s", ent->d_name);
+                struct stat st;
+                if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+                    FILE *f = fopen(path, "rb");
+                    if (f) {
+                        fseek(f, 0, SEEK_END);
+                        long size = ftell(f);
+                        rewind(f);
+                        uint8_t *buf = malloc(size);
+                        if (buf) {
+                            fread(buf, 1, size, f);
+                            unsigned long long hash = hash_generate(buf, size);
+                            free(buf);
+
+                            // ¡Encontrado! Enviamos DISTRESP directo a la IP y puerto original
+                            char resp[512];
+                            snprintf(resp, sizeof(resp), "DISTRESP %llu %ld %s %d %s",
+                                     hash, size, "127.0.0.1", p2p->port, ent->d_name); // Reemplazar 127.0.0.1 con IP real si no es localhost
+
+                            struct Client c = client_constructor(p2p->domain, p2p->service, p2p->protocol, query.origin_port, p2p->interface);
+                            c.request(&c, query.origin_ip, resp, strlen(resp) + 1);
+                        }
+                        fclose(f);
+                    }
+                }
+            }
+        }
+        closedir(dir);
+    }
+
+    // REGLA 3: Reenvío (Propagación con TTL)
+    if (query.ttl > 0) {
+        query.ttl -= 1;
+        pthread_mutex_lock(&hosts_mutex);
+        for (int i = 0; i < p2p->known_hosts.length; i++) {
+            char host[72];
+            strncpy(host, (char *)p2p->known_hosts.retrieve(&p2p->known_hosts, i), sizeof(host) - 1);
+            host[sizeof(host) - 1] = '\0';
+
+            char host_ip[INET_ADDRSTRLEN];
+            int host_port = p2p->port;
+            sscanf(host, "%15[^:]:%d", host_ip, &host_port);
+
+            // No reenviar al nodo que nos mandó la consulta, ni al servidor central
+            if (host_port == p2p->port || host_port == server_port) continue;
+            if (strcmp(host_ip, sender_ip) == 0) continue;
+
+            char query_msg[512];
+            snprintf(query_msg, sizeof(query_msg), "DISTFIND %s %s %s %d %d",
+                     query.query_id, query.search_term, query.origin_ip, query.origin_port, query.ttl);
+
+            struct Client c = client_constructor(p2p->domain, p2p->service, p2p->protocol, host_port, p2p->interface);
+            c.request(&c, host_ip, query_msg, strlen(query_msg) + 1);
+        }
+        pthread_mutex_unlock(&hosts_mutex);
+    }
+    return NULL;
 }
 
 void *server_function(void *arg)
@@ -124,14 +314,14 @@ void *server_function(void *arg)
                        filename, client_address, client_port);
             }
 
-        } 
+        }
         else if (strncmp(request, "FIND ", 5) == 0) {
             // FIND <name>: responde con entradas del registro que coincidan con el nombre
             char name[256] = "";
             sscanf(request + 5, "%255s", name);
             hash_find(name, client);
 
-        } 
+        }
         else if (strncmp(request, "LOCATE ", 7) == 0) {
             // LOCATE <hash>: responde con todos los peers que tienen ese archivo
             unsigned long long hash = 0;
@@ -159,7 +349,38 @@ void *server_function(void *arg)
                 }
             }
 
-        } 
+        }
+        //Atrapar busquedas distribuidas de vecinos
+        else if (strncmp(request, "DISTFIND ", 9) == 0) {
+            DistSearchThreadArg *ts_arg = malloc(sizeof(DistSearchThreadArg));
+            ts_arg->p2p = p2p;
+            strncpy(ts_arg->sender_ip, client_address, INET_ADDRSTRLEN);
+
+            sscanf(request + 9, "%127s %255s %63s %d %d",
+                   ts_arg->query.query_id,
+                   ts_arg->query.search_term,
+                   ts_arg->query.origin_ip,
+                   &ts_arg->query.origin_port,
+                   &ts_arg->query.ttl);
+
+            // Delegar a un hilo separado para que el servidor siga atendiendo otras peticiones
+            pthread_t thread;
+            pthread_create(&thread, NULL, handle_incoming_search_thread, ts_arg);
+            pthread_detach(thread);
+
+        } else if (strncmp(request, "DISTRESP ", 9) == 0) {
+            // respuesta directa de alguien que si tiene el archivo que buscabamos
+            unsigned long long hash;
+            size_t size;
+            char ip[64];
+            int port;
+            char filename[256];
+            if (sscanf(request + 9, "%llu %zu %63s %d %255s", &hash, &size, ip, &port, filename) == 5) {
+                printf("\n  [Vecino %s:%d lo tiene!] %-30s  size=%-10zu  hash=%-20llu\n> ",
+                       ip, port, filename, size, hash);
+                fflush(stdout);
+            }
+        }
         else {
             // Mensaje desconocido: auto-agregar el remitente a known_hosts
             pthread_mutex_lock(&hosts_mutex);
@@ -182,51 +403,6 @@ void *server_function(void *arg)
     return NULL;
 }
 
-// Argumento para cada hilo de descarga de un chunk
-typedef struct {
-    char ip[INET_ADDRSTRLEN];
-    int  port;
-    unsigned long long hash;
-    size_t offset;
-    size_t length;
-    uint8_t *dst;   // posición correcta dentro del buffer ensamblado
-    int success;
-} ChunkArg;
-
-static void *download_chunk(void *arg) {
-    ChunkArg *ca = arg;
-    ca->success = 0;
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return NULL;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(ca->port);
-    inet_pton(AF_INET, ca->ip, &addr.sin_addr);
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd); return NULL;
-    }
-
-    char msg[128];
-    snprintf(msg, sizeof(msg), "FILEGET %llu %zu %zu",
-             ca->hash, ca->offset, ca->length);
-    send(fd, msg, strlen(msg), 0);
-    shutdown(fd, SHUT_WR);
-
-    size_t received = 0;
-    while (received < ca->length) {
-        int n = read(fd, ca->dst + received, ca->length - received);
-        if (n <= 0) break;
-        received += n;
-    }
-    close(fd);
-    ca->success = (received == ca->length);
-    return NULL;
-}
-
 void *client_function(void *arg)
 {
     struct PeerToPeer *p2p = arg;
@@ -243,11 +419,34 @@ void *client_function(void *arg)
         input[strcspn(input, "\n")] = '\0';
         if (input[0] == '\0') { printf("> "); fflush(stdout); continue; }
 
-        if (strncmp(input, "find ", 5) == 0) {
-            // Busqueda centralizada: 
+        if (strncmp(input, "connect ", 8) == 0) {
+            char ip[64];
+            int cport;
+            if (sscanf(input + 8, "%63s %d", ip, &cport) == 2) {
+                char host_str[128];
+                snprintf(host_str, sizeof(host_str), "%s:%d", ip, cport);
+                pthread_mutex_lock(&hosts_mutex);
+                p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, host_str, strlen(host_str) + 1);
+                pthread_mutex_unlock(&hosts_mutex);
+                printf("Vecino %s agregado exitosamente a la red.\n", host_str);
+            } else {
+                printf("Formato incorrecto. Uso: connect <ip> <puerto>\n");
+            }
+            printf("> "); fflush(stdout); continue;
+        }
+
+        if (strncmp(input, "find -d ", 8) == 0) {
+            // Busqueda distribuida:
+            // envía un mensaje a los vecinos conocidos.
+            char name[256];
+            sscanf(input + 8, "%255s", name);
+            initiate_distributed_search(p2p, name, 3);
+
+        } else if (strncmp(input, "find -s ", 8) == 0) {
+            // Busqueda centralizada forzada:
             // envía un mensaje FIND al servidor central y muestra los resultados.
             char name[256];
-            sscanf(input + 5, "%255s", name);
+            sscanf(input + 8, "%255s", name);
 
             char msg[512];
             snprintf(msg, sizeof(msg), "FIND %s", name);
@@ -288,6 +487,54 @@ void *client_function(void *arg)
                     line = strtok(NULL, "\n");
                 }
                 if (count == 0) printf("  (no results)\n");
+            }
+
+        } else if (strncmp(input, "find ", 5) == 0) {
+            // Busqueda mixta:
+            // envía un mensaje FIND al servidor central y cae a distribuida si falla.
+            char name[256];
+            sscanf(input + 5, "%255s", name);
+
+            char msg[512];
+            snprintf(msg, sizeof(msg), "FIND %s", name);
+
+            int fd = connect_to_server();
+            if (fd < 0) {
+                printf("Could not connect to server, falling back to distributed search...\n");
+                initiate_distributed_search(p2p, name, 3);
+            } else {
+                send(fd, msg, strlen(msg), 0);
+                // Indica que se ha terminado de escribir para que el read() del servidor retorne
+                shutdown(fd, SHUT_WR);
+
+                // Lee todas las líneas de respuesta hasta que se cierre la conexión
+                char buf[30000];
+                int total = 0, r;
+                while ((r = read(fd, buf + total,
+                                 sizeof(buf) - total - 1)) > 0)
+                    total += r;
+                buf[total] = '\0';
+                close(fd);
+
+                printf("Results for \"%s\":\n", name);
+                int count = 0;
+                char *line = strtok(buf, "\n");
+                while (line) {
+                    if (strcmp(line, "END") == 0) break;
+                    unsigned long long hash;
+                    size_t size;
+                    char ip[64];
+                    int port;
+                    char filename[256];
+                    if (sscanf(line, "%llu %zu %63s %d %255s",
+                               &hash, &size, ip, &port, filename) == 5) {
+                        printf("  %-30s  size=%-10zu  hash=%-20llu  peer=%s:%d\n",
+                               filename, size, hash, ip, port);
+                        count++;
+                    }
+                    line = strtok(NULL, "\n");
+                }
+                if (count == 0) initiate_distributed_search(p2p, name, 3);
             }
 
         } else if (strncmp(input, "request ", 8) == 0) {
