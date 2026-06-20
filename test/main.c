@@ -121,6 +121,53 @@ static void scan_and_register(int my_port) {
     closedir(dir);
 }
 
+// Solicita al servidor central la lista de vecinos
+static void fetch_neighbors_from_server(struct PeerToPeer *p2p) {
+    if (server_port == 0) return;
+
+    int fd = connect_to_server();
+    if (fd < 0) return;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "GETNEIGHBORS %d", p2p->port);
+    send(fd, msg, strlen(msg), 0);
+    shutdown(fd, SHUT_WR);
+
+    char buf[2048];
+    int total = 0, r;
+    while ((r = read(fd, buf + total, sizeof(buf) - total - 1)) > 0) {
+        total += r;
+    }
+    buf[total] = '\0';
+    close(fd);
+
+    if (strncmp(buf, "NEIGHBORS ", 10) == 0) {
+        char *token = strtok(buf + 10, " \n");
+        pthread_mutex_lock(&hosts_mutex);
+        while (token) {
+            // Evitar agregarnos a nosotros mismos
+            char me[64];
+            snprintf(me, sizeof(me), "127.0.0.1:%d", p2p->port);
+
+            if (strcmp(token, me) != 0) {
+                // Verificar que no esté ya en la lista
+                short found = 0;
+                for (int i = 0; i < p2p->known_hosts.length; i++) {
+                    if (strcmp(token, p2p->known_hosts.retrieve(&p2p->known_hosts, i)) == 0) {
+                        found = 1; break;
+                    }
+                }
+                if (!found) {
+                    p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, token, strlen(token) + 1);
+                    printf("Vecino %s agregado automáticamente.\n", token);
+                }
+            }
+            token = strtok(NULL, " \n");
+        }
+        pthread_mutex_unlock(&hosts_mutex);
+    }
+}
+
 static void *download_chunk(void *arg) {
     ChunkArg *ca = arg;
     ca->success = 0;
@@ -368,6 +415,41 @@ void *server_function(void *arg)
             pthread_create(&thread, NULL, handle_incoming_search_thread, ts_arg);
             pthread_detach(thread);
 
+        } else if (strncmp(request, "GETNEIGHBORS ", 13) == 0) {
+            int client_port;
+            if (sscanf(request + 13, "%d", &client_port) == 1) {
+                char me[128];
+                snprintf(me, sizeof(me), "%s:%d", client_address, client_port);
+
+                // Armar la respuesta con los vecinos conocidos
+                char response[2048] = "NEIGHBORS ";
+                pthread_mutex_lock(&hosts_mutex);
+
+                int count = 0;
+                // Se pasa hasta 5 vecinos
+                for (int i = 0; i < p2p->known_hosts.length && count < 5; i++) {
+                    char *h = p2p->known_hosts.retrieve(&p2p->known_hosts, i);
+                    if (strcmp(h, me) != 0) {
+                        strcat(response, h);
+                        strcat(response, " ");
+                        count++;
+                    }
+                }
+
+                // Guarda al cliente nuevo en la red del servidor
+                short found = 0;
+                for (int i = 0; i < p2p->known_hosts.length; i++) {
+                    if (strcmp(me, p2p->known_hosts.retrieve(&p2p->known_hosts, i)) == 0) {
+                        found = 1; break;
+                    }
+                }
+                if (!found) {
+                    p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, me, strlen(me) + 1);
+                }
+                pthread_mutex_unlock(&hosts_mutex);
+
+                send(client, response, strlen(response), 0);
+            }
         } else if (strncmp(request, "DISTRESP ", 9) == 0) {
             // respuesta directa de alguien que si tiene el archivo que buscabamos
             unsigned long long hash;
@@ -410,7 +492,9 @@ void *client_function(void *arg)
     // Registra todos los archivos locales con el servidor al iniciar
     scan_and_register(p2p->port);
 
-    printf("Commands: find <name>  |  request <size> <hash>\n> ");
+	fetch_neighbors_from_server(p2p);
+
+    printf("Commands: find <name> | find -s <name> | find -d <name> | request <size> <hash>\n> ");
     fflush(stdout);
 
     char input[512];
