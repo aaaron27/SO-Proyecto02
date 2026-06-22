@@ -13,6 +13,27 @@
 
 static pthread_mutex_t hosts_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static char my_local_ip[INET_ADDRSTRLEN] = "127.0.0.1";
+
+static void get_local_ip(void) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return;
+    struct sockaddr_in serv;
+    memset(&serv, 0, sizeof(serv));
+    serv.sin_family = AF_INET;
+    serv.sin_addr.s_addr = inet_addr("8.8.8.8");
+    serv.sin_port = htons(53);
+
+    if (connect(sock, (const struct sockaddr*) &serv, sizeof(serv)) == 0) {
+        struct sockaddr_in name;
+        socklen_t namelen = sizeof(name);
+        if (getsockname(sock, (struct sockaddr*) &name, &namelen) == 0) {
+            inet_ntop(AF_INET, &name.sin_addr, my_local_ip, INET_ADDRSTRLEN);
+        }
+    }
+    close(sock);
+}
+
 // Seteado desde argv[2] (ip:puerto del servidor central)
 static char server_ip[INET_ADDRSTRLEN] = "";
 static int  server_port = 0;
@@ -84,7 +105,7 @@ static void scan_and_register(int my_port) {
 
         unsigned long long hash = hash_generate(buf, size);
         // Guarda copia en hash_files/shared_data/<hash>, inserta en BST, persiste en hash_log
-        hash_insert(buf, size, "127.0.0.1");
+        hash_insert(buf, size, my_local_ip);
         free(buf);
 
         char msg[512];
@@ -134,7 +155,7 @@ static void fetch_neighbors_from_server(struct PeerToPeer *p2p) {
         pthread_mutex_lock(&hosts_mutex);
         while (token && num_to_greet < 5) {
             char me[64];
-            snprintf(me, sizeof(me), "%s:%d", "127.0.0.1", p2p->port);
+            snprintf(me, sizeof(me), "%s:%d", my_local_ip, p2p->port);
 
             if (strcmp(token, me) != 0) {
                 short found = 0;
@@ -162,7 +183,7 @@ static void fetch_neighbors_from_server(struct PeerToPeer *p2p) {
             int host_port;
             if (sscanf(to_greet[i], "%15[^:]:%d", host_ip, &host_port) == 2) {
                 char hello_msg[128];
-                snprintf(hello_msg, sizeof(hello_msg), "RETT %s %d", "127.0.0.1", p2p->port);
+                snprintf(hello_msg, sizeof(hello_msg), "RETT %s %d", my_local_ip, p2p->port);
 
                 struct Client c = client_constructor(p2p->domain, p2p->service, p2p->protocol, host_port, p2p->interface);
                 c.request(&c, host_ip, hello_msg, strlen(hello_msg) + 1);
@@ -213,7 +234,7 @@ void initiate_distributed_search(struct PeerToPeer *p2p, const char* search_term
 
     snprintf(query.query_id, sizeof(query.query_id), "127.0.0.1:%d-%ld", p2p->port, current_time);
     strncpy(query.search_term, search_term, sizeof(query.search_term));
-    strncpy(query.origin_ip, "127.0.0.1", sizeof(query.origin_ip));
+    strncpy(query.origin_ip, my_local_ip, sizeof(query.origin_ip));
     query.origin_port = p2p->port;
     query.ttl = initial_ttl;
 
@@ -281,7 +302,7 @@ static void *handle_incoming_search_thread(void *arg) {
 
                             char resp[512];
                             snprintf(resp, sizeof(resp), "DISTRESP %llu %ld %s %d %s",
-                                     hash, size, "127.0.0.1", p2p->port, ent->d_name); // Reemplazar 127.0.0.1 con IP real si no es localhost
+                                     hash, size, my_local_ip, p2p->port, ent->d_name); // Reemplazar 127.0.0.1 con IP real si no es localhost
 
                             struct Client c = client_constructor(p2p->domain, p2p->service, p2p->protocol, query.origin_port, p2p->interface);
                             c.request(&c, query.origin_ip, resp, strlen(resp) + 1);
@@ -739,7 +760,7 @@ void *client_function(void *arg)
 
             // 6. Guardar archivo ensamblado en shared/
             if (ok) {
-                hash_insert(assembled, size, "127.0.0.1");
+                hash_insert(assembled, size, my_local_ip);
             } else {
                 printf("Descarga incompleta, archivo no guardado.\n");
             }
@@ -774,6 +795,7 @@ void *client_function(void *arg)
 }
 
 int main(int argc, char *argv[]) {
+    get_local_ip();
     // Se asegura de que existan los directorios necesarios
     mkdir("hash_files", 0755);
     mkdir("hash_files/shared_data", 0755);
