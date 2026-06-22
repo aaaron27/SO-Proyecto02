@@ -250,15 +250,15 @@ static void *handle_incoming_search_thread(void *arg) {
     strncpy(sender_ip, ts_arg->sender_ip, INET_ADDRSTRLEN);
     free(ts_arg);
 
-    // REGLA 1: Evitar ciclos
+    //Evitar ciclos
     pthread_mutex_lock(&hosts_mutex);
     int seen = is_query_seen(query.query_id);
     if (!seen) mark_query_seen(query.query_id);
     pthread_mutex_unlock(&hosts_mutex);
 
-    if (seen) return NULL; // Ya procesado, evitamos ciclo infinito
+    if (seen) return NULL;
 
-    // REGLA 2: Búsqueda Local (Escaneamos nuestra carpeta 'shared')
+    // Busqueda Local
     DIR *dir = opendir("shared");
     if (dir) {
         struct dirent *ent;
@@ -279,7 +279,6 @@ static void *handle_incoming_search_thread(void *arg) {
                             unsigned long long hash = hash_generate(buf, size);
                             free(buf);
 
-                            // ¡Encontrado! Enviamos DISTRESP directo a la IP y puerto original
                             char resp[512];
                             snprintf(resp, sizeof(resp), "DISTRESP %llu %ld %s %d %s",
                                      hash, size, "127.0.0.1", p2p->port, ent->d_name); // Reemplazar 127.0.0.1 con IP real si no es localhost
@@ -295,7 +294,6 @@ static void *handle_incoming_search_thread(void *arg) {
         closedir(dir);
     }
 
-    // REGLA 3: Reenvío (Propagación con TTL)
     if (query.ttl > 0) {
         query.ttl -= 1;
         pthread_mutex_lock(&hosts_mutex);
@@ -308,7 +306,7 @@ static void *handle_incoming_search_thread(void *arg) {
             int host_port = p2p->port;
             sscanf(host, "%15[^:]:%d", host_ip, &host_port);
 
-            // No reenviar al nodo que nos mandó la consulta, ni al servidor central
+            // No reenviar al nodo que mando la consulta, ni al servidor central
             if (host_port == p2p->port || host_port == server_port) continue;
             if (strcmp(host_ip, sender_ip) == 0) continue;
 
@@ -471,7 +469,7 @@ void *server_function(void *arg)
                 if (!found) {
                     char *safe_neighbor = strdup(new_neighbor);
                     p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, safe_neighbor, strlen(safe_neighbor) + 1);
-                    printf("\n  [+] Agregado de vuelta: %s\n> ", safe_neighbor);
+                    printf("\n Agregado de vuelta: %s\n> ", safe_neighbor);
                     fflush(stdout);
                 }
                 pthread_mutex_unlock(&hosts_mutex);
