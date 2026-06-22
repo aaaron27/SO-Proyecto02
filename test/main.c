@@ -1,6 +1,6 @@
 #include "../libeom.h"
 #include "../Networking/Nodes/PeerToPeer.h"
-
+#include "../Networking/Nodes/DistributedSearch.h"
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -16,23 +16,7 @@ static pthread_mutex_t hosts_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Seteado desde argv[2] (ip:puerto del servidor central)
 static char server_ip[INET_ADDRSTRLEN] = "";
 static int  server_port = 0;
-
-typedef struct {
-    char query_id[128];
-    char search_term[256];
-    char origin_ip[64];
-    int origin_port;
-    int ttl;
-} DistributedSearchQuery;
-
-#define MAX_SEEN_QUERIES 100
-char seen_queries[MAX_SEEN_QUERIES][128];
-int seen_queries_index = 0;
-
-void mark_query_seen(const char* query_id) {
-    strncpy(seen_queries[seen_queries_index % MAX_SEEN_QUERIES], query_id, 128);
-    seen_queries_index++;
-}
+static int default_ttl = 3;
 
 typedef struct {
     struct PeerToPeer *p2p;
@@ -143,14 +127,16 @@ static void fetch_neighbors_from_server(struct PeerToPeer *p2p) {
 
     if (strncmp(buf, "NEIGHBORS ", 10) == 0) {
         char *token = strtok(buf + 10, " \n");
+
+        char **to_greet = malloc(5 * sizeof(char*));
+        int num_to_greet = 0;
+
         pthread_mutex_lock(&hosts_mutex);
-        while (token) {
-            // Evitar agregarnos a nosotros mismos
+        while (token && num_to_greet < 5) {
             char me[64];
-            snprintf(me, sizeof(me), "127.0.0.1:%d", p2p->port);
+            snprintf(me, sizeof(me), "%s:%d", "127.0.0.1", p2p->port);
 
             if (strcmp(token, me) != 0) {
-                // Verificar que no esté ya en la lista
                 short found = 0;
                 for (int i = 0; i < p2p->known_hosts.length; i++) {
                     if (strcmp(token, p2p->known_hosts.retrieve(&p2p->known_hosts, i)) == 0) {
@@ -158,13 +144,32 @@ static void fetch_neighbors_from_server(struct PeerToPeer *p2p) {
                     }
                 }
                 if (!found) {
-                    p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, token, strlen(token) + 1);
-                    printf("Vecino %s agregado automáticamente.\n", token);
+                    char *safe_token = strdup(token);
+                    p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, safe_token, strlen(safe_token) + 1);
+
+                    to_greet[num_to_greet] = strdup(token);
+                    num_to_greet++;
+
+                    printf("Vecino %s agregado automáticamente.\n", safe_token);
                 }
             }
             token = strtok(NULL, " \n");
         }
         pthread_mutex_unlock(&hosts_mutex);
+
+        for (int i = 0; i < num_to_greet; i++) {
+            char host_ip[64];
+            int host_port;
+            if (sscanf(to_greet[i], "%15[^:]:%d", host_ip, &host_port) == 2) {
+                char hello_msg[128];
+                snprintf(hello_msg, sizeof(hello_msg), "RETT %s %d", "127.0.0.1", p2p->port);
+
+                struct Client c = client_constructor(p2p->domain, p2p->service, p2p->protocol, host_port, p2p->interface);
+                c.request(&c, host_ip, hello_msg, strlen(hello_msg) + 1);
+            }
+            free(to_greet[i]);
+        }
+        free(to_greet);
     }
 }
 
@@ -247,10 +252,7 @@ static void *handle_incoming_search_thread(void *arg) {
 
     // REGLA 1: Evitar ciclos
     pthread_mutex_lock(&hosts_mutex);
-    int seen = 0;
-    for (int i = 0; i < MAX_SEEN_QUERIES; i++) {
-        if (strcmp(seen_queries[i], query.query_id) == 0) seen = 1;
-    }
+    int seen = is_query_seen(query.query_id);
     if (!seen) mark_query_seen(query.query_id);
     pthread_mutex_unlock(&hosts_mutex);
 
@@ -427,7 +429,7 @@ void *server_function(void *arg)
 
                 int count = 0;
                 // Se pasa hasta 5 vecinos
-                for (int i = 0; i < p2p->known_hosts.length && count < 5; i++) {
+				for (int i = p2p->known_hosts.length - 1; i >= 0 && count < 5; i--) {
                     char *h = p2p->known_hosts.retrieve(&p2p->known_hosts, i);
                     if (strcmp(h, me) != 0) {
                         strcat(response, h);
@@ -444,11 +446,35 @@ void *server_function(void *arg)
                     }
                 }
                 if (!found) {
-                    p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, me, strlen(me) + 1);
+                    char *safe_me = strdup(me);
+                    p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, safe_me, strlen(safe_me) + 1);
                 }
                 pthread_mutex_unlock(&hosts_mutex);
 
                 send(client, response, strlen(response), 0);
+            }
+        } else if (strncmp(request, "RETT ", 5) == 0) {
+            // Agregar de vuelta a los vecinos nuevos
+            char n_ip[64];
+            int n_port;
+            if (sscanf(request + 5, "%63s %d", n_ip, &n_port) == 2) {
+                char new_neighbor[128];
+                snprintf(new_neighbor, sizeof(new_neighbor), "%s:%d", n_ip, n_port);
+
+                pthread_mutex_lock(&hosts_mutex);
+                short found = 0;
+                for (int i = 0; i < p2p->known_hosts.length; i++) {
+                    if (strcmp(new_neighbor, p2p->known_hosts.retrieve(&p2p->known_hosts, i)) == 0) {
+                        found = 1; break;
+                    }
+                }
+                if (!found) {
+                    char *safe_neighbor = strdup(new_neighbor);
+                    p2p->known_hosts.insert(&p2p->known_hosts, p2p->known_hosts.length, safe_neighbor, strlen(safe_neighbor) + 1);
+                    printf("\n  [+] Agregado de vuelta: %s\n> ", safe_neighbor);
+                    fflush(stdout);
+                }
+                pthread_mutex_unlock(&hosts_mutex);
             }
         } else if (strncmp(request, "DISTRESP ", 9) == 0) {
             // respuesta directa de alguien que si tiene el archivo que buscabamos
@@ -524,7 +550,7 @@ void *client_function(void *arg)
             // envía un mensaje a los vecinos conocidos.
             char name[256];
             sscanf(input + 8, "%255s", name);
-            initiate_distributed_search(p2p, name, 3);
+            initiate_distributed_search(p2p, name, default_ttl);
 
         } else if (strncmp(input, "find -s ", 8) == 0) {
             // Busqueda centralizada forzada:
@@ -572,6 +598,14 @@ void *client_function(void *arg)
                 }
                 if (count == 0) printf("  (no results)\n");
             }
+
+        } else if (strncmp(input, "vecinos", 7) == 0) {
+            pthread_mutex_lock(&hosts_mutex);
+            printf("Mis vecinos actuales (%d):\n", p2p->known_hosts.length);
+            for (int i = 0; i < p2p->known_hosts.length; i++) {
+                printf("  -> %s\n", (char *)p2p->known_hosts.retrieve(&p2p->known_hosts, i));
+            }
+            pthread_mutex_unlock(&hosts_mutex);
 
         } else if (strncmp(input, "find ", 5) == 0) {
             // Busqueda mixta:
@@ -773,6 +807,11 @@ int main(int argc, char *argv[]) {
         p2p.known_hosts.insert(&p2p.known_hosts,
                                 p2p.known_hosts.length,
                                 argv[2], strlen(argv[2]) + 1);
+    }
+    //Leer el TTL si se pasa como cuarto parámetro
+    if (argc > 3) {
+        default_ttl = atoi(argv[3]);
+        if (default_ttl <= 0) default_ttl = 3;
     }
 
     p2p.user_portal(&p2p);
